@@ -13,7 +13,7 @@ from discord.ext import commands
 import config
 import ui
 from api import DiscordAPI, fetch_latest_build_number
-from quests import QuestRunner
+from quests import QuestRunner, get_quest_name, get_task_type, get_seconds_needed, get_seconds_done, get_user_status
 
 # ── Pagination View ────────────────────────────────────────────────────────────
 class StatusPaginator(discord.ui.View):
@@ -27,6 +27,10 @@ class StatusPaginator(discord.ui.View):
         self.prev_button.disabled = (self.current == 0)
         self.next_button.disabled = (self.current >= len(self.embeds) - 1)
         self.page_label.label = f"Page {self.current + 1} / {len(self.embeds)}"
+        
+        # If there's only 1 page, disable all buttons visually
+        if len(self.embeds) <= 1:
+            self.clear_items()
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.primary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -223,26 +227,74 @@ class QuestCog(commands.Cog):
             delta = datetime.now(timezone.utc) - self._started_at
             uptime = str(delta).split(".")[0]
 
-        quests = []
+        # Fetch current quests from cache
+        all_quests = []
         if self._api_cache:
             try:
-                quests = self._api_cache.get("/quests/@me").json().get("quests", [])
+                all_quests = self._api_cache.get("/quests/@me").json().get("quests", [])
             except Exception:
                 pass
 
+        # Filter ONLY accepted (enrolled) quests that are NOT completed yet
+        accepted_quests = []
+        for q in all_quests:
+            if get_user_status(q).get("enrolledAt") and not get_user_status(q).get("completedAt"):
+                accepted_quests.append(q)
+
         embeds = []
         per_page = 5
-        total_pages = max(1, math.ceil(len(quests) / per_page))
+        total_pages = max(1, math.ceil(len(accepted_quests) / per_page))
 
         for page in range(total_pages):
             start = page * per_page
-            chunk = quests[start:start + per_page]
+            chunk = accepted_quests[start:start + per_page]
             
             status_desc = (
                 f"**State:** 🟢 Running\n"
                 f"**Uptime:** `{uptime}`\n"
                 f"**Accepted:** `{stats.get('accepted', 0)}` | "
                 f"**Completed:** `{stats.get('completed', 0)}` | "
+                f"**Errors:** `{stats.get('errors', 0)}`"
+            )
+
+            embed = ui.card(
+                title="📊 Quest Farmer Status",
+                description=status_desc,
+                color=ui.OK_COLOR,
+            )
+            
+            quest_text = ""
+            if not chunk:
+                quest_text = "*No accepted quests pending.*"
+            for q in chunk:
+                # Use the safe helpers from quests.py to parse the weird API structure
+                name = get_quest_name(q)
+                task_type = get_task_type(q)
+                val = get_seconds_done(q)
+                target = get_seconds_needed(q)
+                
+                progress_str = f"{int(val)}/{target}" if target else "0/0"
+                status_icon = "🟡" # They are all enrolled if they show up here
+                
+                quest_text += f"{status_icon} **{name}**\n└ `{progress_str}`\n\n"
+
+            embed.add_field(name="Active Quests", value=quest_text.strip() or "None", inline=False)
+            embed.set_footer(text=f"🏷️ Founder @tryacidbacon | Page {page + 1} / {total_pages}")
+            embeds.append(embed)
+
+        # Setup view
+        view = None
+        if len(embeds) > 1:
+            view = StatusPaginator(embeds)
+        else:
+            # If only 1 page, we still send the view but it clears its own buttons in __init__
+            view = StatusPaginator(embeds)
+
+        await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(QuestCog(bot))get('completed', 0)}` | "
                 f"**Errors:** `{stats.get('errors', 0)}`"
             )
 
