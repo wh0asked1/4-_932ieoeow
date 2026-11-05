@@ -3,10 +3,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Bot Configuration ─────────────────────────────────────────────────────────
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
-GUILD_ID = os.getenv("GUILD_ID") or None
-OWNER_IDS = [int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()]
 
+# Slash command sync
+GUILD_ID = os.getenv("GUILD_ID") or None
+
+# 🔓 Gate removed — empty list means everyone can use it
+OWNER_IDS = [] 
+
+# ── Quest Defaults ────────────────────────────────────────────────────────────
 DEFAULT_USER_TOKEN = os.getenv("DEFAULT_USER_TOKEN", "")
 DEFAULT_BUILD_NUMBER = int(os.getenv("DEFAULT_BUILD_NUMBER", "504649"))
 
