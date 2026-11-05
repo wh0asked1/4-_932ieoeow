@@ -259,8 +259,9 @@ class QuestCog(commands.Cog):
             embed.set_footer(text="🏷️ Founder @tryacidbacon | Page " + str(page + 1) + " / " + str(total_pages))
             embeds.append(embed)
 
-        view = StatusPaginator(embeds) if len(embeds) > 1 else None
+        view = StatusPaginator(embeds)
         await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(QuestCog(bot))
