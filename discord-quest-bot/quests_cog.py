@@ -14,6 +14,7 @@ import ui
 from api import DiscordAPI, fetch_latest_build_number
 from quests import QuestRunner, get_quest_name, get_task_type, get_seconds_needed, get_seconds_done, get_user_status
 
+
 class StatusPaginator(discord.ui.View):
     def __init__(self, embeds: list[discord.Embed]):
         super().__init__(timeout=180)
@@ -27,7 +28,7 @@ class StatusPaginator(discord.ui.View):
     def update_buttons(self):
         self.prev_button.disabled = (self.current == 0)
         self.next_button.disabled = (self.current >= len(self.embeds) - 1)
-        self.page_label.label = f"Page {self.current + 1} / {len(self.embeds)}"
+        self.page_label.label = "Page " + str(self.current + 1) + " / " + str(len(self.embeds))
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.primary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -45,6 +46,7 @@ class StatusPaginator(discord.ui.View):
         self.update_buttons()
         await interaction.response.edit_message(embed=self.embeds[self.current], view=self)
 
+
 class QuestCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -58,7 +60,8 @@ class QuestCog(commands.Cog):
         self._api_cache = None
 
     def _log(self, msg: str):
-        line = f"{datetime.now().strftime('%H:%M:%S')} {msg}"
+        now = datetime.now().strftime("%H:%M:%S")
+        line = now + " " + msg
         self._log_buffer.append(line)
         self._log_buffer = self._log_buffer[-50:]
         print(line)
@@ -72,14 +75,14 @@ class QuestCog(commands.Cog):
                 return
             
             self._api_cache = api
-            self._log(f"logged in as {user['username']} ({user['id']})")
+            self._log("logged in as " + user['username'])
             self._runner = QuestRunner(api, on_log=self._log, stop_event=self._stop)
 
             while not self._stop.is_set():
                 try:
                     self._runner.run()
                 except Exception as e:
-                    self._log(f"loop err: {e}")
+                    self._log("loop err: " + str(e))
                 
                 if self._stop.is_set():
                     break
@@ -92,22 +95,20 @@ class QuestCog(commands.Cog):
             self._send_summary_dm(owner_interaction, user)
 
         except Exception as e:
-            self._log(f"worker fatal: {e}")
+            self._log("worker fatal: " + str(e))
 
     def _send_summary_dm(self, interaction: discord.Interaction, user_data: dict):
         if not self._runner:
             return
         
         stats = self._runner.stats
-        embed = ui.ok(
-            "🏁 Quest Farming Complete",
-            "The bench is clean. Here is your final haul.",
-            [
-                ("Account", f"**{user_data['username']}**", True),
-                ("Total Accepted", f"`{stats.get('accepted', 0)}`", True),
-                ("Total Completed", f"`{stats.get('completed', 0)}`", True),
-            ]
-        )
+        
+        fields = []
+        fields.append(("Account", "**" + user_data['username'] + "**", True))
+        fields.append(("Total Accepted", "`" + str(stats.get('accepted', 0)) + "`", True))
+        fields.append(("Total Completed", "`" + str(stats.get('completed', 0)) + "`", True))
+        
+        embed = ui.ok("🏁 Quest Farming Complete", "The bench is clean. Here is your final haul.", fields)
         
         async def send_dm():
             try:
@@ -122,7 +123,8 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="ping", description="Check if the bot is alive.")
     async def ping(self, interaction: discord.Interaction):
-        await interaction.response.send_message(embed=ui.ok("Pong 🏓", f"Gateway latency: `{round(self.bot.latency * 1000)}ms`"))
+        latency = round(self.bot.latency * 1000)
+        await interaction.response.send_message(embed=ui.ok("Pong 🏓", "Gateway latency: `" + str(latency) + "ms`"))
 
     @app_commands.command(name="login", description="Log in with your user token.")
     @app_commands.describe(token="The user token to log in with")
@@ -134,8 +136,9 @@ class QuestCog(commands.Cog):
             return await interaction.followup.send(embed=ui.err("Token Rejected", "Rejected by Discord. Invalid token."), ephemeral=True)
         
         self.user_token = token.strip()
+        acc_str = "**" + user['username'] + "**\n`" + user['id'] + "`"
         await interaction.followup.send(
-            embed=ui.ok("Logged In", "The account on the bench is live and saved.", [("Account", f"**{user['username']}**\n`{user['id']}`", False)]),
+            embed=ui.ok("Logged In", "The account on the bench is live and saved.", [("Account", acc_str, False)]),
             ephemeral=True
         )
 
@@ -162,16 +165,20 @@ class QuestCog(commands.Cog):
         self._thread.start()
 
         user_created_at = datetime.fromtimestamp(discord.utils.snowflake_time(int(user['id'])).timestamp())
-        embed = ui.ok(
-            "🚀 Quest Farmer Started",
-            "Connected and ready. The bench is cooking.",
-            [
-                ("Account", f"**{user['username']}**\n`{user['id']}`", True),
-                ("Created", user_created_at.strftime("%Y-%m-%d"), True),
-                ("Client Build", f"`{self.build_number}`", True),
-            ]
-        )
-        embed.set_thumbnail(url=f"https://cdn.discordapp.com/avatars/{user['id']}/{user['avatar']}.png" if user.get('avatar') else None)
+        
+        acc_str = "**" + user['username'] + "**\n`" + user['id'] + "`"
+        fields = [
+            ("Account", acc_str, True),
+            ("Created", user_created_at.strftime("%Y-%m-%d"), True),
+            ("Client Build", "`" + str(self.build_number) + "`", True),
+        ]
+        
+        embed = ui.ok("🚀 Quest Farmer Started", "Connected and ready. The bench is cooking.", fields)
+        
+        if user.get('avatar'):
+            avatar_url = "https://cdn.discordapp.com/avatars/" + user['id'] + "/" + user['avatar'] + ".png"
+            embed.set_thumbnail(url=avatar_url)
+            
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="stop", description="Stop the quest auto-farmer.")
@@ -220,13 +227,11 @@ class QuestCog(commands.Cog):
             start = page * per_page
             chunk = accepted_quests[start:start + per_page]
             
-            status_desc = (
-                f"**State:** 🟢 Running\n"
-                f"**Uptime:** `{uptime}`\n"
-                f"**Accepted:** `{stats.get('accepted', 0)}` | "
-                f"**Completed:** `{stats.get('completed', 0)}` | "
-                f"**Errors:** `{stats.get('errors', 0)}`"
-            )
+            status_desc = "**State:** 🟢 Running\n"
+            status_desc += "**Uptime:** `" + uptime + "`\n"
+            status_desc += "**Accepted:** `" + str(stats.get('accepted', 0)) + "` | "
+            status_desc += "**Completed:** `" + str(stats.get('completed', 0)) + "` | "
+            status_desc += "**Errors:** `" + str(stats.get('errors', 0)) + "`"
 
             embed = ui.card(title="📊 Quest Farmer Status", description=status_desc, color=ui.OK_COLOR)
             
@@ -237,11 +242,11 @@ class QuestCog(commands.Cog):
                 name = get_quest_name(q)
                 val = get_seconds_done(q)
                 target = get_seconds_needed(q)
-                progress_str = f"{int(val)}/{target}" if target else "0/0"
-                quest_text += f"🟡 **{name}**\n└ `{progress_str}`\n\n"
+                progress_str = str(int(val)) + "/" + str(target) if target else "0/0"
+                quest_text += "🟡 **" + name + "**\n└ `" + progress_str + "`\n\n"
 
             embed.add_field(name="Active Quests", value=quest_text.strip() or "None", inline=False)
-            embed.set_footer(text=f"🏷️ Founder @tryacidbacon | Page {page + 1} / {total_pages}")
+            embed.set_footer(text="🏷️ Founder @tryacidbacon | Page " + str(page + 1) + " / " + str(total_pages))
             embeds.append(embed)
 
         view = StatusPaginator(embeds) if len(embeds) > 1 else None
