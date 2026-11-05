@@ -1,5 +1,7 @@
 """Slash commands: /start /stop /login /token /removetoken /status /ping
-Every reply is a branded embed carrying the founder credit."""
+Every reply is a branded embed carrying the founder credit.
+NOW OPEN TO EVERYONE."""
+
 import asyncio
 import threading
 from datetime import datetime, timezone
@@ -27,9 +29,8 @@ class QuestCog(commands.Cog):
 
     # ── helpers ────────────────────────────────────────────────────────────
     def _is_owner(self, interaction: discord.Interaction) -> bool:
-        if not config.OWNER_IDS:
-            return True
-        return interaction.user.id in config.OWNER_IDS
+        # 🔓 GATE RIPPED OFF — everyone is an owner now
+        return True
 
     def _log(self, msg: str):
         line = f"{datetime.now().strftime('%H:%M:%S')} {msg}"
@@ -61,11 +62,7 @@ class QuestCog(commands.Cog):
     def _running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    async def _deny(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            embed=ui.err("Not yours to touch", "This command is owner-gated."),
-            ephemeral=True,
-        )
+    # The old _deny function is removed since nobody gets denied.
 
     # ── commands ───────────────────────────────────────────────────────────
     @app_commands.command(name="ping", description="Check if the bot is alive.")
@@ -76,8 +73,6 @@ class QuestCog(commands.Cog):
     @app_commands.command(name="token", description="Set the user token used for quest farming.")
     @app_commands.describe(token="The Discord user token (keep it private!)")
     async def token_cmd(self, interaction: discord.Interaction, token: str):
-        if not self._is_owner(interaction):
-            return await self._deny(interaction)
         await interaction.response.defer(ephemeral=True)
         api = DiscordAPI(token.strip(), self.build_number)
         user = api.validate()
@@ -94,8 +89,6 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="removetoken", description="Forget the stored user token.")
     async def removetoken(self, interaction: discord.Interaction):
-        if not self._is_owner(interaction):
-            return await self._deny(interaction)
         self.user_token = None
         await interaction.response.send_message(
             embed=ui.warn("Token Cleared", "Nothing on the bench. `/token` to set again."),
@@ -103,8 +96,6 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="login", description="Validate the current token and show the account.")
     async def login(self, interaction: discord.Interaction):
-        if not self._is_owner(interaction):
-            return await self._deny(interaction)
         if not self.user_token:
             return await interaction.response.send_message(
                 embed=ui.warn("No Token", "Use `/token <token>` first."), ephemeral=True)
@@ -122,8 +113,6 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="start", description="Start the quest auto-farmer.")
     async def start(self, interaction: discord.Interaction):
-        if not self._is_owner(interaction):
-            return await self._deny(interaction)
         if not self.user_token:
             return await interaction.response.send_message(
                 embed=ui.warn("No Token", "Set one first: `/token <token>`"), ephemeral=True)
@@ -145,8 +134,6 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="stop", description="Stop the quest auto-farmer.")
     async def stop(self, interaction: discord.Interaction):
-        if not self._is_owner(interaction):
-            return await self._deny(interaction)
         if not self._running():
             return await interaction.response.send_message(
                 embed=ui.warn("Not Running", "Nothing to stop."), ephemeral=True)
@@ -160,8 +147,6 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="status", description="Show farmer status and recent log.")
     async def status(self, interaction: discord.Interaction):
-        if not self._is_owner(interaction):
-            return await self._deny(interaction)
         await interaction.response.defer()
         running = self._running()
         stats = self._runner.stats if self._runner else {}
