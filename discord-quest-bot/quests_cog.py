@@ -1,3 +1,5 @@
+"""Slash commands: /start /stop /login /logout /status /ping"""
+
 import asyncio
 import threading
 import math
