@@ -3,6 +3,8 @@
 import asyncio
 import threading
 import math
+import json
+import os
 from datetime import datetime, timezone
 
 import discord
@@ -13,6 +15,24 @@ import config
 import ui
 from api import DiscordAPI, fetch_latest_build_number
 from quests import QuestRunner, get_quest_name, get_seconds_needed, get_seconds_done, get_user_status, is_enrolled, is_completed
+
+TRACKER_FILE = "tracker.json"
+
+def load_tracker():
+    if os.path.exists(TRACKER_FILE):
+        try:
+            with open(TRACKER_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_tracker(data):
+    try:
+        with open(TRACKER_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception:
+        pass
 
 
 def make_bar(current, total, length=10):
@@ -62,6 +82,7 @@ class QuestCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.user_token = config.DEFAULT_USER_TOKEN or None
+        self.user_id = None
         self.build_number = config.DEFAULT_BUILD_NUMBER
         self._thread = None
         self._stop = threading.Event()
@@ -72,6 +93,26 @@ class QuestCog(commands.Cog):
     def _log(self, msg):
         print(msg)
 
+    def _update_tracker(self):
+        if not self._api_cache or not self.user_id:
+            return
+        try:
+            quests = self._api_cache.get("/quests/@me").json().get("quests", [])
+            tracker = load_tracker()
+            if self.user_id not in tracker:
+                tracker[self.user_id] = {}
+            changed = False
+            for q in quests:
+                if is_completed(q):
+                    name = get_quest_name(q)
+                    if name not in tracker[self.user_id]:
+                        tracker[self.user_id][name] = datetime.now(timezone.utc).isoformat()
+                        changed = True
+            if changed:
+                save_tracker(tracker)
+        except Exception:
+            pass
+
     def _worker(self, owner_interaction: discord.Interaction):
         try:
             api = DiscordAPI(self.user_token, self.build_number)
@@ -81,12 +122,14 @@ class QuestCog(commands.Cog):
                 return
             
             self._api_cache = api
+            self.user_id = user['id']
             self._log("logged in as " + user['username'])
             self._runner = QuestRunner(api, on_log=self._log, stop_event=self._stop)
 
             while not self._stop.is_set():
                 try:
                     self._runner.run()
+                    self._update_tracker()
                 except Exception as e:
                     self._log("loop err: " + str(e))
                 
@@ -98,6 +141,7 @@ class QuestCog(commands.Cog):
                         break
                     threading.Event().wait(1)
 
+            self._update_tracker()
             self._send_summary_dm(owner_interaction, user)
 
         except Exception as e:
@@ -141,6 +185,7 @@ class QuestCog(commands.Cog):
             return await interaction.followup.send(embed=ui.err("Token Rejected", "Rejected by Discord. Invalid token."), ephemeral=True)
         
         self.user_token = token.strip()
+        self.user_id = user['id']
         acc_str = "**" + user['username'] + "**\n`" + user['id'] + "`"
         await interaction.followup.send(
             embed=ui.ok("Logged In", "The account on the bench is live and saved.", [("Account", acc_str, False)]),
@@ -150,6 +195,7 @@ class QuestCog(commands.Cog):
     @app_commands.command(name="logout", description="Forget the stored user token.")
     async def logout(self, interaction: discord.Interaction):
         self.user_token = None
+        self.user_id = None
         await interaction.response.send_message(embed=ui.warn("Logged Out", "Token cleared. The bench is empty."), ephemeral=True)
 
     @app_commands.command(name="start", description="Start the quest auto-farmer.")
@@ -163,6 +209,7 @@ class QuestCog(commands.Cog):
         if not user:
             return await interaction.followup.send(embed=ui.err("Token Invalid", "Missing or invalid token. Use `/login` first."), ephemeral=True)
 
+        self.user_id = user['id']
         self.build_number = await asyncio.to_thread(fetch_latest_build_number)
         self._stop.clear()
         self._started_at = datetime.now(timezone.utc)
@@ -221,10 +268,15 @@ class QuestCog(commands.Cog):
                 pass
 
         accepted_quests = []
+        completed_quests = []
         for q in all_quests:
-            # Using the helper functions to catch both camelCase and snake_case
             if is_enrolled(q) and not is_completed(q):
                 accepted_quests.append(q)
+            elif is_completed(q):
+                completed_quests.append(q)
+
+        tracker = load_tracker()
+        tracked_count = len(tracker.get(self.user_id, {})) if self.user_id else 0
 
         embeds = []
         per_page = 5
@@ -236,9 +288,9 @@ class QuestCog(commands.Cog):
             
             status_desc = "**State:** 🟢 Running\n"
             status_desc += "**Uptime:** `" + uptime + "`\n"
-            status_desc += "**Accepted:** `" + str(stats.get('accepted', 0)) + "` | "
-            status_desc += "**Completed:** `" + str(stats.get('completed', 0)) + "` | "
-            status_desc += "**Errors:** `" + str(stats.get('errors', 0)) + "`"
+            status_desc += "**Accepted:** `" + str(len(accepted_quests)) + "` | "
+            status_desc += "**Completed:** `" + str(len(completed_quests)) + "`\n"
+            status_desc += "**Tracked (All Time):** `" + str(tracked_count) + "`"
 
             embed = ui.card(title="📊 Quest Farmer Status", description=status_desc, color=ui.OK_COLOR)
             
