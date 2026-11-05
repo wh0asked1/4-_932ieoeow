@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 import config
 import ui
@@ -37,13 +37,23 @@ def save_tracker(data):
 
 def get_orbs(quest):
     cfg = quest.get("config", {})
-    rewards = cfg.get("rewards", [])
+    rewards = cfg.get("rewards", {})
+    
     if isinstance(rewards, dict):
+        if "orb_quantity" in rewards:
+            return rewards["orb_quantity"]
+        if "quantity" in rewards:
+            return rewards["quantity"]
         rewards = [rewards]
+    
     orbs = 0
-    for r in rewards:
-        if r.get("type") == "ORB" or "orb" in r.get("type", "").lower():
-            orbs += r.get("quantity", 0)
+    if isinstance(rewards, list):
+        for r in rewards:
+            if isinstance(r, dict):
+                if "orb_quantity" in r:
+                    orbs += r["orb_quantity"]
+                elif r.get("type") == "ORB" or "orb" in str(r.get("type", "")).lower():
+                    orbs += r.get("quantity", 0)
     return orbs
 
 def make_bar(current, total, length=10):
@@ -327,7 +337,6 @@ class QuestCog(commands.Cog):
             self._total_seconds += time.time() - self._last_start_time
             self._last_start_time = None
             
-        # Force stop instantly
         self._stop.set()
         self._thread = None
         
@@ -342,11 +351,9 @@ class QuestCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
         
-        # Build the initial view
         view = await self._build_status_view()
         msg = await interaction.followup.send(embed=view.embeds[0], view=view, ephemeral=True)
 
-        # Live update loop (runs for 5 minutes)
         for _ in range(30):
             await asyncio.sleep(10)
             if not self._running() or msg.flags.ephemeral is False:
