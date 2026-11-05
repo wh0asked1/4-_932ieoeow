@@ -1,5 +1,5 @@
 """Slash commands: /start /stop /login /token /removetoken /status /ping
-Fully polished, ephemeral, paginated, and auto-DMing."""
+Ephemeral everywhere except /ping."""
 
 import asyncio
 import threading
@@ -15,6 +15,8 @@ import ui
 from api import DiscordAPI, fetch_latest_build_number
 from quests import QuestRunner
 
+MISSING_TOKEN_MSG = "Missing token, please insert it via `/token` or `/login`."
+
 # ── Pagination View ────────────────────────────────────────────────────────────
 class StatusPaginator(discord.ui.View):
     def __init__(self, embeds: list[discord.Embed]):
@@ -26,7 +28,7 @@ class StatusPaginator(discord.ui.View):
     def update_buttons(self):
         self.prev_button.disabled = (self.current == 0)
         self.next_button.disabled = (self.current >= len(self.embeds) - 1)
-        self.page_label.label = f"Page {self.current + 1}/{len(self.embeds)}"
+        self.page_label.label = f"Page {self.current + 1} / {len(self.embeds)}"
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.primary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -55,7 +57,6 @@ class QuestCog(commands.Cog):
         self._runner: QuestRunner | None = None
         self._log_buffer: list[str] = []
         self._started_at: datetime | None = None
-        self._owner_id: int | None = None  # Track who started it for the DM
         self._api_cache: DiscordAPI | None = None
 
     # ── helpers ────────────────────────────────────────────────────────────
@@ -83,24 +84,20 @@ class QuestCog(commands.Cog):
                 except Exception as e:
                     self._log(f"loop err: {e}")
                 
-                # Check if we should auto-stop (no more quests)
                 if self._stop.is_set():
                     break
                 
-                # Sleep between passes
                 for _ in range(config.POLL_INTERVAL):
                     if self._stop.is_set():
                         break
                     threading.Event().wait(1)
 
-            # Auto-stop triggered: Send the DM
             self._send_summary_dm(owner_interaction, user)
 
         except Exception as e:
             self._log(f"worker fatal: {e}")
 
     def _send_summary_dm(self, interaction: discord.Interaction, user_data: dict):
-        """Fires when the worker stops. Sends a DM with the stats."""
         if not self._runner:
             return
         
@@ -121,7 +118,6 @@ class QuestCog(commands.Cog):
             except discord.Forbidden:
                 self._log("Could not DM user (DMs closed).")
         
-        # We're in a separate thread, so schedule the DM on the bot's loop
         asyncio.run_coroutine_threadsafe(send_dm(), self.bot.loop)
 
     def _running(self) -> bool:
@@ -135,7 +131,7 @@ class QuestCog(commands.Cog):
             "Pong 🏓", f"Gateway latency: `{round(self.bot.latency * 1000)}ms`"))
 
     @app_commands.command(name="token", description="Set the user token used for quest farming.")
-    @app_commands.describe(user_id="Your Discord User ID (for display)", token="The user token")
+    @app_commands.describe(user_id="Your Discord User ID", token="The user token")
     async def token_cmd(self, interaction: discord.Interaction, user_id: str, token: str):
         await interaction.response.defer(ephemeral=True)
         
@@ -170,16 +166,15 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="login", description="Validate the current token and show the account.")
     async def login(self, interaction: discord.Interaction):
-        if not self.user_token:
-            return await interaction.response.send_message(
-                embed=ui.warn("No Token", "Use `/token <id> <token>` first."), ephemeral=True)
-        
+        # No missing-token warning here, just let the API validate it
         await interaction.response.defer(ephemeral=True)
-        api = DiscordAPI(self.user_token, self.build_number)
+        api = DiscordAPI(self.user_token or "", self.build_number)
         user = api.validate()
+        
         if not user:
             return await interaction.followup.send(
-                embed=ui.err("Token Rejected", "Rejected by Discord."), ephemeral=True)
+                embed=ui.err("Token Rejected", "Rejected by Discord. Missing or invalid token."), 
+                ephemeral=True)
         
         await interaction.followup.send(embed=ui.ok(
             "Logged In",
@@ -189,9 +184,7 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="start", description="Start the quest auto-farmer.")
     async def start(self, interaction: discord.Interaction):
-        if not self.user_token:
-            return await interaction.response.send_message(
-                embed=ui.warn("No Token", "Set one first: `/token <id> <token>`"), ephemeral=True)
+        # No missing-token warning here, just let the API validate it
         if self._running():
             return await interaction.response.send_message(
                 embed=ui.warn("Already Running", "The farmer's already on the floor."),
@@ -199,22 +192,20 @@ class QuestCog(commands.Cog):
         
         await interaction.response.defer(ephemeral=True)
         
-        # Validate token to get user data for the embed
-        api = DiscordAPI(self.user_token, self.build_number)
+        api = DiscordAPI(self.user_token or "", self.build_number)
         user = api.validate()
         if not user:
             return await interaction.followup.send(
-                embed=ui.err("Token Invalid", "Couldn't validate the token."), ephemeral=True)
+                embed=ui.err("Token Invalid", "Missing or invalid token. Use `/token` first."), 
+                ephemeral=True)
 
         self.build_number = await asyncio.to_thread(fetch_latest_build_number)
         self._stop.clear()
         self._started_at = datetime.now(timezone.utc)
         
-        # Thread start
         self._thread = threading.Thread(target=self._worker, args=(interaction,), daemon=True)
         self._thread.start()
 
-        # User creation date
         user_created_at = datetime.fromtimestamp(discord.utils.snowflake_time(int(user['id'])).timestamp())
 
         embed = ui.ok(
@@ -232,6 +223,9 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="stop", description="Stop the quest auto-farmer.")
     async def stop(self, interaction: discord.Interaction):
+        if not self.user_token:
+            return await interaction.response.send_message(
+                embed=ui.warn("Missing Token", MISSING_TOKEN_MSG), ephemeral=True)
         if not self._running():
             return await interaction.response.send_message(
                 embed=ui.warn("Not Running", "Nothing to stop."), ephemeral=True)
@@ -246,16 +240,19 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="status", description="Show farmer status and recent log.")
     async def status(self, interaction: discord.Interaction):
+        if not self.user_token:
+            return await interaction.response.send_message(
+                embed=ui.warn("Missing Token", MISSING_TOKEN_MSG), ephemeral=True)
+
         await interaction.response.defer(ephemeral=True)
         running = self._running()
         stats = self._runner.stats if self._runner else {}
-        token_state = "set ✅" if self.user_token else "missing ❌"
+        token_state = "🟢 Set"
         uptime = "—"
         if self._started_at and running:
             delta = datetime.now(timezone.utc) - self._started_at
             uptime = str(delta).split(".")[0]
 
-        # Fetch current quests to build pagination
         quests = []
         if self._api_cache:
             try:
@@ -271,25 +268,26 @@ class QuestCog(commands.Cog):
             start = page * per_page
             chunk = quests[start:start + per_page]
             
+            status_desc = (
+                f"**State:** {'🟢 Running' if running else '🔴 Stopped'}\n"
+                f"**Token:** {token_state}\n"
+                f"**Uptime:** `{uptime}`\n"
+                f"**Accepted:** `{stats.get('accepted', 0)}` | "
+                f"**Completed:** `{stats.get('completed', 0)}` | "
+                f"**Errors:** `{stats.get('errors', 0)}`"
+            )
+
             embed = ui.card(
                 title="📊 Quest Farmer Status",
-                description="Live snapshot off the bench.",
+                description=status_desc,
                 color=ui.OK_COLOR if running else ui.ERR_COLOR,
             )
-            embed.add_field(name="State", value="🟢 running" if running else "🔴 stopped", inline=True)
-            embed.add_field(name="Token", value=token_state, inline=True)
-            embed.add_field(name="Uptime", value=f"`{uptime}`", inline=True)
-            embed.add_field(name="Accepted", value=f"`{stats.get('accepted', 0)}`", inline=True)
-            embed.add_field(name="Completed", value=f"`{stats.get('completed', 0)}`", inline=True)
             
             quest_text = ""
             if not chunk:
-                quest_text = "No active quests."
+                quest_text = "*No active quests found.*"
             for q in chunk:
-                # Safe get quest name
                 name = q.get("config", {}).get("messages", {}).get("questName", "Unknown Quest")
-                
-                # Safe get progress
                 us = q.get("userStatus", {})
                 enrolled = bool(us.get("enrolledAt"))
                 completed = bool(us.get("completedAt"))
@@ -302,12 +300,14 @@ class QuestCog(commands.Cog):
                         target = q.get("config", {}).get("taskConfig", {}).get("tasks", {}).get(task_type, {}).get("target", 0)
                         progress_str = f"{int(val)}/{target}"
                         break
+                elif completed:
+                    progress_str = "Completed ✅"
                 
                 status_icon = "🟢" if completed else ("🟡" if enrolled else "⚪")
-                quest_text += f"{status_icon} **{name}** — `{progress_str}`\n"
+                quest_text += f"{status_icon} **{name}**\n└ `{progress_str}`\n\n"
 
-            embed.add_field(name="Quests", value=quest_text or "None", inline=False)
-            embed.set_footer(text=f"🏷️ Founder @tryacidbacon | Page {page + 1}/{total_pages}")
+            embed.add_field(name="Active Quests", value=quest_text.strip() or "None", inline=False)
+            embed.set_footer(text=f"🏷️ Founder @tryacidbacon | Page {page + 1} / {total_pages}")
             embeds.append(embed)
 
         view = StatusPaginator(embeds) if len(embeds) > 1 else None
