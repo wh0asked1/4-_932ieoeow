@@ -1,10 +1,11 @@
-"""Slash commands: /start /stop /login /logout /status /ping"""
+"""Slash commands: /start /stop /login /logout /status /ping /notification"""
 
 import asyncio
 import threading
 import math
 import json
 import os
+import time
 from datetime import datetime, timezone
 
 import discord
@@ -34,6 +35,16 @@ def save_tracker(data):
     except Exception:
         pass
 
+def get_orbs(quest):
+    cfg = quest.get("config", {})
+    rewards = cfg.get("rewards", [])
+    if isinstance(rewards, dict):
+        rewards = [rewards]
+    orbs = 0
+    for r in rewards:
+        if r.get("type") == "ORB" or "orb" in r.get("type", "").lower():
+            orbs += r.get("quantity", 0)
+    return orbs
 
 def make_bar(current, total, length=10):
     if total <= 0:
@@ -83,15 +94,32 @@ class QuestCog(commands.Cog):
         self.bot = bot
         self.user_token = config.DEFAULT_USER_TOKEN or None
         self.user_id = None
+        self._selfbot_user = None
+        self._dm_user = None
         self.build_number = config.DEFAULT_BUILD_NUMBER
+        self.notifications_enabled = True
+        
         self._thread = None
+        self._monitor_thread = None
         self._stop = threading.Event()
         self._runner = None
-        self._started_at = None
         self._api_cache = None
+        
+        self._total_seconds = 0
+        self._last_start_time = None
 
     def _log(self, msg):
         print(msg)
+
+    @property
+    def _uptime_str(self):
+        total = self._total_seconds
+        if self._running() and self._last_start_time:
+            total += (time.time() - self._last_start_time)
+        h = int(total // 3600)
+        m = int((total % 3600) // 60)
+        s = int(total % 60)
+        return str(h) + "h " + str(m) + "m " + str(s) + "s"
 
     def _update_tracker(self):
         if not self._api_cache or not self.user_id:
@@ -102,16 +130,54 @@ class QuestCog(commands.Cog):
             if self.user_id not in tracker:
                 tracker[self.user_id] = {}
             changed = False
+            
+            newly_completed = []
             for q in quests:
                 if is_completed(q):
                     name = get_quest_name(q)
                     if name not in tracker[self.user_id]:
                         tracker[self.user_id][name] = datetime.now(timezone.utc).isoformat()
                         changed = True
+                        newly_completed.append(q)
+            
             if changed:
                 save_tracker(tracker)
+                
+            if self.notifications_enabled and self._dm_user:
+                for q in newly_completed:
+                    name = get_quest_name(q)
+                    orbs = get_orbs(q)
+                    self._send_completion_dm(name, orbs)
         except Exception:
             pass
+
+    def _send_completion_dm(self, name, orbs):
+        fields = []
+        fields.append(("Quest", "**" + name + "**", False))
+        if orbs > 0:
+            fields.append(("Orbs", "`" + str(orbs) + "`", True))
+        
+        embed = ui.ok("✅ Quest Completed", "A quest just finished on the bench.", fields)
+        
+        if self._selfbot_user and self._selfbot_user.get('avatar'):
+            avatar_url = "https://cdn.discordapp.com/avatars/" + self._selfbot_user['id'] + "/" + self._selfbot_user['avatar'] + ".png"
+            embed.set_thumbnail(url=avatar_url)
+        
+        async def send():
+            try:
+                await self._dm_user.send(embed=embed)
+            except Exception:
+                pass
+        
+        asyncio.run_coroutine_threadsafe(send(), self.bot.loop)
+
+    def _monitor_loop(self):
+        while not self._stop.is_set():
+            self._update_tracker()
+            for _ in range(15):
+                if self._stop.is_set():
+                    return
+                threading.Event().wait(1)
 
     def _worker(self, owner_interaction: discord.Interaction):
         try:
@@ -122,6 +188,7 @@ class QuestCog(commands.Cog):
                 return
             
             self._api_cache = api
+            self._selfbot_user = user
             self.user_id = user['id']
             self._log("logged in as " + user['username'])
             self._runner = QuestRunner(api, on_log=self._log, stop_event=self._stop)
@@ -175,6 +242,13 @@ class QuestCog(commands.Cog):
         latency = round(self.bot.latency * 1000)
         await interaction.response.send_message(embed=ui.ok("Pong 🏓", "Gateway latency: `" + str(latency) + "ms`"))
 
+    @app_commands.command(name="notification", description="Toggle quest completion DMs.")
+    @app_commands.describe(enabled="True to enable, False to disable")
+    async def notification(self, interaction: discord.Interaction, enabled: bool):
+        self.notifications_enabled = enabled
+        status_str = "enabled" if enabled else "disabled"
+        await interaction.response.send_message(embed=ui.ok("Notifications", "Quest completion DMs are now **" + status_str + "**."), ephemeral=True)
+
     @app_commands.command(name="login", description="Log in with your user token.")
     @app_commands.describe(token="The user token to log in with")
     async def login(self, interaction: discord.Interaction, token: str):
@@ -186,6 +260,7 @@ class QuestCog(commands.Cog):
         
         self.user_token = token.strip()
         self.user_id = user['id']
+        self._selfbot_user = user
         acc_str = "**" + user['username'] + "**\n`" + user['id'] + "`"
         await interaction.followup.send(
             embed=ui.ok("Logged In", "The account on the bench is live and saved.", [("Account", acc_str, False)]),
@@ -196,6 +271,7 @@ class QuestCog(commands.Cog):
     async def logout(self, interaction: discord.Interaction):
         self.user_token = None
         self.user_id = None
+        self._selfbot_user = None
         await interaction.response.send_message(embed=ui.warn("Logged Out", "Token cleared. The bench is empty."), ephemeral=True)
 
     @app_commands.command(name="start", description="Start the quest auto-farmer.")
@@ -210,11 +286,18 @@ class QuestCog(commands.Cog):
             return await interaction.followup.send(embed=ui.err("Token Invalid", "Missing or invalid token. Use `/login` first."), ephemeral=True)
 
         self.user_id = user['id']
+        self._selfbot_user = user
+        self._dm_user = interaction.user
+        self._last_start_time = time.time()
+        
         self.build_number = await asyncio.to_thread(fetch_latest_build_number)
         self._stop.clear()
-        self._started_at = datetime.now(timezone.utc)
         self._thread = threading.Thread(target=self._worker, args=(interaction,), daemon=True)
         self._thread.start()
+        
+        if not getattr(self, "_monitor_thread", None) or not self._monitor_thread.is_alive():
+            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+            self._monitor_thread.start()
 
         user_created_at = datetime.fromtimestamp(discord.utils.snowflake_time(int(user['id'])).timestamp())
         
@@ -239,6 +322,11 @@ class QuestCog(commands.Cog):
             return await interaction.response.send_message(embed=ui.warn("Not Running", "Nothing to stop."), ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
+        
+        if self._last_start_time:
+            self._total_seconds += time.time() - self._last_start_time
+            self._last_start_time = None
+            
         self._stop.set()
         self._thread.join(timeout=10)
         self._thread = None
@@ -252,11 +340,8 @@ class QuestCog(commands.Cog):
             return await interaction.response.send_message(embed=ui.warn("Not Running", "The bot is not running. Start it with `/start`."), ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
-        stats = self._runner.stats if self._runner else {}
-        uptime = "—"
-        if self._started_at:
-            delta = datetime.now(timezone.utc) - self._started_at
-            uptime = str(delta).split(".")[0]
+        
+        uptime = self._uptime_str
 
         all_quests = []
         if self._api_cache:
@@ -275,9 +360,6 @@ class QuestCog(commands.Cog):
             elif is_completed(q):
                 completed_quests.append(q)
 
-        tracker = load_tracker()
-        tracked_count = len(tracker.get(self.user_id, {})) if self.user_id else 0
-
         embeds = []
         per_page = 5
         total_pages = max(1, math.ceil(len(accepted_quests) / per_page))
@@ -287,10 +369,9 @@ class QuestCog(commands.Cog):
             chunk = accepted_quests[start:start + per_page]
             
             status_desc = "**State:** 🟢 Running\n"
-            status_desc += "**Uptime:** `" + uptime + "`\n"
+            status_desc += "**Total Hours:** `" + uptime + "`\n"
             status_desc += "**Accepted:** `" + str(len(accepted_quests)) + "` | "
             status_desc += "**Completed:** `" + str(len(completed_quests)) + "`\n"
-            status_desc += "**Tracked (All Time):** `" + str(tracked_count) + "`"
 
             embed = ui.card(title="📊 Quest Farmer Status", description=status_desc, color=ui.OK_COLOR)
             
