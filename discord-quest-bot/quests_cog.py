@@ -69,7 +69,7 @@ def make_bar(current, total, length=10):
 
 class StatusPaginator(discord.ui.View):
     def __init__(self, embeds):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None) # Never dies until message is closed
         self.embeds = embeds
         self.current = 0
         if len(self.embeds) <= 1:
@@ -175,7 +175,14 @@ class QuestCog(commands.Cog):
 
     def _worker(self, api, selfbot_user, dm_user, stop_event):
         user_id = selfbot_user['id']
-        runner = QuestRunner(api, on_log=self._log, stop_event=stop_event)
+        
+        def log_hook(msg):
+            self._log(msg)
+            # Update tracker immediately when a quest finishes
+            if msg.startswith("Completed: "):
+                self._update_tracker(api, selfbot_user, dm_user)
+
+        runner = QuestRunner(api, on_log=log_hook, stop_event=stop_event)
         if user_id in self._workers:
             self._workers[user_id]["runner"] = runner
             
@@ -354,13 +361,18 @@ class QuestCog(commands.Cog):
         view = await self._build_status_view(token, user_id, worker)
         msg = await interaction.followup.send(embed=view.embeds[0], view=view, ephemeral=True)
 
-        for _ in range(30):
+        # Live update loop - runs indefinitely until stopped or message deleted
+        while True:
             await asyncio.sleep(10)
-            if user_id not in self._workers or not self._workers[user_id]["thread"].is_alive() or msg.flags.ephemeral is False:
+            if user_id not in self._workers or not self._workers[user_id]["thread"].is_alive():
                 break
             try:
                 new_view = await self._build_status_view(token, user_id, self._workers[user_id])
                 await msg.edit(embed=new_view.embeds[0], view=new_view)
+            except discord.NotFound:
+                break
+            except discord.HTTPException:
+                pass
             except Exception:
                 break
 
