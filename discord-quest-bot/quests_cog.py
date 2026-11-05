@@ -102,16 +102,15 @@ class StatusPaginator(discord.ui.View):
 class QuestCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.accounts = {} # discord_user_id -> { "token": str, "user": dict }
-        self._workers = {} # selfbot_user_id -> { "thread": Thread, "monitor": Thread, "stop": Event, "start_time": float, "total_seconds": float, "api": DiscordAPI }
-        
+        self.accounts = {}
+        self._workers = {}
         self.build_number = config.DEFAULT_BUILD_NUMBER
         self.notifications_enabled = True
 
     def _log(self, msg):
         print(msg)
 
-    def _update_tracker(self, api, selfbot_user, dm_user):
+    def _update_tracker(self, api, selfbot_user, dm_user, silent=False):
         user_id = selfbot_user['id']
         try:
             quests = api.get("/quests/@me").json().get("quests", [])
@@ -127,12 +126,13 @@ class QuestCog(commands.Cog):
                     if name not in tracker[user_id]:
                         tracker[user_id][name] = datetime.now(timezone.utc).isoformat()
                         changed = True
-                        newly_completed.append(q)
+                        if not silent:
+                            newly_completed.append(q)
             
             if changed:
                 save_tracker(tracker)
                 
-            if self.notifications_enabled and dm_user:
+            if self.notifications_enabled and dm_user and not silent:
                 for q in newly_completed:
                     name = get_quest_name(q)
                     orbs = get_orbs(q)
@@ -161,6 +161,7 @@ class QuestCog(commands.Cog):
         asyncio.run_coroutine_threadsafe(send(), self.bot.loop)
 
     def _monitor_loop(self, api, selfbot_user, dm_user, stop_event):
+        self._update_tracker(api, selfbot_user, dm_user, silent=True)
         while not stop_event.is_set():
             self._update_tracker(api, selfbot_user, dm_user)
             for _ in range(15):
@@ -175,6 +176,7 @@ class QuestCog(commands.Cog):
             self._workers[user_id]["runner"] = runner
             
         try:
+            self._update_tracker(api, selfbot_user, dm_user, silent=True)
             while not stop_event.is_set():
                 try:
                     runner.run()
