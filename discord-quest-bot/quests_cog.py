@@ -120,13 +120,16 @@ class QuestCog(commands.Cog):
             changed = False
             
             newly_completed = []
+            runner = self._workers.get(user_id, {}).get("runner")
+            
             for q in quests:
                 if is_completed(q):
                     name = get_quest_name(q)
+                    qid = q.get("id")
                     if name not in tracker[user_id]:
                         tracker[user_id][name] = datetime.now(timezone.utc).isoformat()
                         changed = True
-                        if not silent:
+                        if not silent and runner and qid in runner.completed_ids:
                             newly_completed.append(q)
             
             if changed:
@@ -284,7 +287,7 @@ class QuestCog(commands.Cog):
             "start_time": time.time(),
             "total_seconds": 0,
             "api": api,
-            "last_quests": []  # Fallback cache
+            "last_quests": []
         }
 
         t = threading.Thread(target=self._worker, args=(api, user, interaction.user, stop_event), daemon=True)
