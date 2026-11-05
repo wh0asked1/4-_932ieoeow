@@ -160,7 +160,8 @@ class QuestCog(commands.Cog):
         
         asyncio.run_coroutine_threadsafe(send(), self.bot.loop)
 
-    def _monitor_loop(self, api, selfbot_user, dm_user, stop_event):
+    def _monitor_loop(self, token, selfbot_user, dm_user, stop_event):
+        api = DiscordAPI(token, self.build_number)
         self._update_tracker(api, selfbot_user, dm_user, silent=True)
         while not stop_event.is_set():
             self._update_tracker(api, selfbot_user, dm_user)
@@ -286,7 +287,7 @@ class QuestCog(commands.Cog):
         }
 
         t = threading.Thread(target=self._worker, args=(api, user, interaction.user, stop_event), daemon=True)
-        m = threading.Thread(target=self._monitor_loop, args=(api, user, interaction.user, stop_event), daemon=True)
+        m = threading.Thread(target=self._monitor_loop, args=(acc["token"], user, interaction.user, stop_event), daemon=True)
         
         self._workers[user_id]["thread"] = t
         self._workers[user_id]["monitor_thread"] = m
@@ -344,7 +345,8 @@ class QuestCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         
         worker = self._workers[user_id]
-        api = worker["api"]
+        token = self.accounts[interaction.user.id]["token"]
+        api = DiscordAPI(token, self.build_number) # Fresh session for status
         
         view = await self._build_status_view(api, user_id, worker)
         msg = await interaction.followup.send(embed=view.embeds[0], view=view, ephemeral=True)
