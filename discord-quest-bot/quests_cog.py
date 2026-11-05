@@ -1,6 +1,6 @@
 """Slash commands: /start /stop /login /token /removetoken /status /ping
 Every reply is a branded embed carrying the founder credit.
-NOW OPEN TO EVERYONE."""
+100% OPEN — absolutely no owner gate."""
 
 import asyncio
 import threading
@@ -28,10 +28,6 @@ class QuestCog(commands.Cog):
         self._started_at: datetime | None = None
 
     # ── helpers ────────────────────────────────────────────────────────────
-    def _is_owner(self, interaction: discord.Interaction) -> bool:
-        # 🔓 GATE RIPPED OFF — everyone is an owner now
-        return True
-
     def _log(self, msg: str):
         line = f"{datetime.now().strftime('%H:%M:%S')} {msg}"
         self._log_buffer.append(line)
@@ -61,8 +57,6 @@ class QuestCog(commands.Cog):
 
     def _running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
-
-    # The old _deny function is removed since nobody gets denied.
 
     # ── commands ───────────────────────────────────────────────────────────
     @app_commands.command(name="ping", description="Check if the bot is alive.")
