@@ -1,5 +1,3 @@
-"""Slash commands: /start /stop /login /logout /status /ping"""
-
 import asyncio
 import threading
 import math
@@ -12,14 +10,24 @@ from discord.ext import commands
 import config
 import ui
 from api import DiscordAPI, fetch_latest_build_number
-from quests import QuestRunner, get_quest_name, get_task_type, get_seconds_needed, get_seconds_done, get_user_status
+from quests import QuestRunner, get_quest_name, get_seconds_needed, get_seconds_done, get_user_status
 
+def make_bar(current, total, length=10):
+    if total <= 0:
+        return "[----------] 0%"
+    percent = min(1.0, max(0.0, current / total))
+    filled = int(length * percent)
+    empty = length - filled
+    bar = "[" + ("■" * filled) + ("-" * empty) + "]"
+    pct = int(percent * 100)
+    return bar + " " + str(pct) + "%"
 
 class StatusPaginator(discord.ui.View):
     def __init__(self, embeds):
         super().__init__(timeout=180)
         self.embeds = embeds
         self.current = 0
+        
         if len(self.embeds) <= 1:
             self.clear_items()
         else:
@@ -46,7 +54,6 @@ class StatusPaginator(discord.ui.View):
         self.update_buttons()
         await interaction.response.edit_message(embed=self.embeds[self.current], view=self)
 
-
 class QuestCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -55,16 +62,11 @@ class QuestCog(commands.Cog):
         self._thread = None
         self._stop = threading.Event()
         self._runner = None
-        self._log_buffer = []
         self._started_at = None
         self._api_cache = None
 
     def _log(self, msg):
-        now = datetime.now().strftime("%H:%M:%S")
-        line = now + " " + msg
-        self._log_buffer.append(line)
-        self._log_buffer = self._log_buffer[-50:]
-        print(line)
+        print(msg)
 
     def _worker(self, owner_interaction):
         try:
@@ -102,7 +104,6 @@ class QuestCog(commands.Cog):
             return
         
         stats = self._runner.stats
-        
         fields = []
         fields.append(("Account", "**" + user_data['username'] + "**", True))
         fields.append(("Total Accepted", "`" + str(stats.get('accepted', 0)) + "`", True))
@@ -114,7 +115,7 @@ class QuestCog(commands.Cog):
             try:
                 await interaction.user.send(embed=embed)
             except discord.Forbidden:
-                self._log("Could not DM user (DMs closed).")
+                self._log("Could not DM user.")
         
         asyncio.run_coroutine_threadsafe(send_dm(), self.bot.loop)
 
@@ -192,7 +193,7 @@ class QuestCog(commands.Cog):
         self._thread = None
         await interaction.followup.send(embed=ui.ok("Quest Farmer Stopped", "Thread closed clean. Bench tidied."), ephemeral=True)
 
-    @app_commands.command(name="status", description="Show farmer status and recent log.")
+    @app_commands.command(name="status", description="Show farmer status and active quests.")
     async def status(self, interaction):
         if not self.user_token:
             return await interaction.response.send_message(embed=ui.warn("Missing Token", "Missing token, please insert it via `/login`"), ephemeral=True)
@@ -242,8 +243,12 @@ class QuestCog(commands.Cog):
                 name = get_quest_name(q)
                 val = get_seconds_done(q)
                 target = get_seconds_needed(q)
-                progress_str = str(int(val)) + "/" + str(target) if target else "0/0"
-                quest_text += "🟡 **" + name + "**\n└ `" + progress_str + "`\n\n"
+                
+                # THE WORKING PROGRESS BAR
+                bar_str = make_bar(val, target)
+                
+                quest_text += "**" + name + "**\n"
+                quest_text += "`" + str(int(val)) + "/" + str(target) + "` " + bar_str + "\n\n"
 
             embed.add_field(name="Active Quests", value=quest_text.strip() or "None", inline=False)
             embed.set_footer(text="🏷️ Founder @tryacidbacon | Page " + str(page + 1) + " / " + str(total_pages))
