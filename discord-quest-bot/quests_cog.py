@@ -1,4 +1,4 @@
-"""Slash commands: /start /stop /login /logout /status /ping /notification"""
+"""Slash commands: /start /stop /login /logout /status /ping /notification /gettoken"""
 
 import asyncio
 import threading
@@ -69,7 +69,7 @@ def make_bar(current, total, length=10):
 
 class StatusPaginator(discord.ui.View):
     def __init__(self, embeds):
-        super().__init__(timeout=None) # Never dies until message is closed
+        super().__init__(timeout=None)
         self.embeds = embeds
         self.current = 0
         if len(self.embeds) <= 1:
@@ -178,7 +178,6 @@ class QuestCog(commands.Cog):
         
         def log_hook(msg):
             self._log(msg)
-            # Update tracker immediately when a quest finishes
             if msg.startswith("Completed: "):
                 self._update_tracker(api, selfbot_user, dm_user)
 
@@ -240,6 +239,34 @@ class QuestCog(commands.Cog):
         self.notifications_enabled = enabled
         status_str = "enabled" if enabled else "disabled"
         await interaction.response.send_message(embed=ui.ok("Notifications", "Quest completion DMs are now **" + status_str + "**."), ephemeral=True)
+
+    @app_commands.command(name="gettoken", description="Get the JavaScript snippet to extract your token.")
+    async def gettoken(self, interaction: discord.Interaction):
+        js_code = (
+            "javascript:(function () {\n"
+            "    location.reload();\n"
+            "    var i = document.createElement('iframe');\n"
+            "    document.body.appendChild(i);\n"
+            "    prompt('Here is your token', i.contentWindow.localStorage.token.replace(/'/g, ''));\n"
+            "})();"
+        )
+        embed = ui.ok("🔑 Token Extractor", "Copy this script to grab your token.")
+        embed.add_field(name="JavaScript", value="```javascript\n" + js_code + "\n```", inline=False)
+        
+        instructions = (
+            "**Method 1 (Console):**\n"
+            "1. Open Discord in your browser.\n"
+            "2. Press `Ctrl+Shift+I` (or `Cmd+Option+I` on Mac).\n"
+            "3. Click the **Console** tab.\n"
+            "4. Paste the code (you may need to type `allow pasting` first) and hit Enter.\n\n"
+            "**Method 2 (Bookmark):**\n"
+            "1. Press `Ctrl+Shift+O` to open the Bookmark Manager.\n"
+            "2. Add a new bookmark and paste the code into the URL field.\n"
+            "3. Click it while on Discord."
+        )
+        embed.add_field(name="Instructions", value=instructions, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="login", description="Log in with your user token.")
     @app_commands.describe(token="The user token to log in with")
@@ -361,7 +388,6 @@ class QuestCog(commands.Cog):
         view = await self._build_status_view(token, user_id, worker)
         msg = await interaction.followup.send(embed=view.embeds[0], view=view, ephemeral=True)
 
-        # Live update loop - runs indefinitely until stopped or message deleted
         while True:
             await asyncio.sleep(10)
             if user_id not in self._workers or not self._workers[user_id]["thread"].is_alive():
@@ -419,7 +445,13 @@ class QuestCog(commands.Cog):
             start = page * per_page
             chunk = enrolled_quests[start:start + per_page]
             
-            status_desc = "**State:** 🟢 Running\n"
+            # If no accepted quests left, show Completed state
+            if accepted_count == 0:
+                state_str = "**State:** 🟢 Completed\n"
+            else:
+                state_str = "**State:** 🔴 Running\n"
+                
+            status_desc = state_str
             status_desc += "**Total Hours:** `" + uptime + "`\n"
             status_desc += "**Accepted:** `" + str(accepted_count) + "` | "
             status_desc += "**Completed:** `" + str(completed_count) + "`\n"
@@ -432,12 +464,12 @@ class QuestCog(commands.Cog):
             for q in chunk:
                 name = get_quest_name(q)
                 if is_completed(q):
-                    quest_text += "**" + name + "**\n✅ `Completed`\n\n"
+                    quest_text += "🟢 **" + name + "**\n✅ `Completed`\n\n"
                 else:
                     val = get_seconds_done(q)
                     target = get_seconds_needed(q)
                     bar_str = make_bar(val, target)
-                    quest_text += "**" + name + "**\n"
+                    quest_text += "🔴 **" + name + "**\n"
                     quest_text += "`" + str(int(val)) + "/" + str(target) + "` " + bar_str + "\n\n"
 
             embed.add_field(name="Your Quests", value=quest_text.strip() or "None", inline=False)
