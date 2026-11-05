@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import config
 import ui
@@ -327,12 +327,13 @@ class QuestCog(commands.Cog):
             self._total_seconds += time.time() - self._last_start_time
             self._last_start_time = None
             
+        # Force stop instantly
         self._stop.set()
-        self._thread.join(timeout=10)
         self._thread = None
+        
         await interaction.followup.send(embed=ui.ok("Quest Farmer Stopped", "Thread closed clean. Bench tidied."), ephemeral=True)
 
-    @app_commands.command(name="status", description="Show farmer status and active quests.")
+    @app_commands.command(name="status", description="Show live farmer status and active quests.")
     async def status(self, interaction: discord.Interaction):
         if not self.user_token:
             return await interaction.response.send_message(embed=ui.warn("Missing Token", "Missing token, please insert it via `/login`"), ephemeral=True)
@@ -341,8 +342,23 @@ class QuestCog(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
         
-        uptime = self._uptime_str
+        # Build the initial view
+        view = await self._build_status_view()
+        msg = await interaction.followup.send(embed=view.embeds[0], view=view, ephemeral=True)
 
+        # Live update loop (runs for 5 minutes)
+        for _ in range(30):
+            await asyncio.sleep(10)
+            if not self._running() or msg.flags.ephemeral is False:
+                break
+            try:
+                new_view = await self._build_status_view()
+                await msg.edit(embed=new_view.embeds[0], view=new_view)
+            except Exception:
+                break
+
+    async def _build_status_view(self):
+        uptime = self._uptime_str
         all_quests = []
         if self._api_cache:
             try:
@@ -392,9 +408,7 @@ class QuestCog(commands.Cog):
             embed.set_footer(text="🏷️ Founder @tryacidbacon | Page " + str(page + 1) + " / " + str(total_pages))
             embeds.append(embed)
 
-        view = StatusPaginator(embeds)
-        await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
-
+        return StatusPaginator(embeds)
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(QuestCog(bot))
