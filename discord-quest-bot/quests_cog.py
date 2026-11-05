@@ -24,13 +24,13 @@ class StatusPaginator(discord.ui.View):
         self.update_buttons()
 
     def update_buttons(self):
+        if len(self.embeds) <= 1:
+            self.clear_items()
+            return
+            
         self.prev_button.disabled = (self.current == 0)
         self.next_button.disabled = (self.current >= len(self.embeds) - 1)
         self.page_label.label = f"Page {self.current + 1} / {len(self.embeds)}"
-        
-        # If there's only 1 page, disable all buttons visually
-        if len(self.embeds) <= 1:
-            self.clear_items()
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.primary)
     async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -61,7 +61,6 @@ class QuestCog(commands.Cog):
         self._started_at: datetime | None = None
         self._api_cache: DiscordAPI | None = None
 
-    # ── helpers ────────────────────────────────────────────────────────────
     def _log(self, msg: str):
         line = f"{datetime.now().strftime('%H:%M:%S')} {msg}"
         self._log_buffer.append(line)
@@ -125,7 +124,6 @@ class QuestCog(commands.Cog):
     def _running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    # ── commands ───────────────────────────────────────────────────────────
     @app_commands.command(name="ping", description="Check if the bot is alive.")
     async def ping(self, interaction: discord.Interaction):
         await interaction.response.send_message(embed=ui.ok(
@@ -227,7 +225,6 @@ class QuestCog(commands.Cog):
             delta = datetime.now(timezone.utc) - self._started_at
             uptime = str(delta).split(".")[0]
 
-        # Fetch current quests from cache
         all_quests = []
         if self._api_cache:
             try:
@@ -235,7 +232,6 @@ class QuestCog(commands.Cog):
             except Exception:
                 pass
 
-        # Filter ONLY accepted (enrolled) quests that are NOT completed yet
         accepted_quests = []
         for q in all_quests:
             if get_user_status(q).get("enrolledAt") and not get_user_status(q).get("completedAt"):
@@ -267,64 +263,14 @@ class QuestCog(commands.Cog):
             if not chunk:
                 quest_text = "*No accepted quests pending.*"
             for q in chunk:
-                # Use the safe helpers from quests.py to parse the weird API structure
                 name = get_quest_name(q)
                 task_type = get_task_type(q)
                 val = get_seconds_done(q)
                 target = get_seconds_needed(q)
                 
                 progress_str = f"{int(val)}/{target}" if target else "0/0"
-                status_icon = "🟡" # They are all enrolled if they show up here
+                status_icon = "🟡"
                 
-                quest_text += f"{status_icon} **{name}**\n└ `{progress_str}`\n\n"
-
-            embed.add_field(name="Active Quests", value=quest_text.strip() or "None", inline=False)
-            embed.set_footer(text=f"🏷️ Founder @tryacidbacon | Page {page + 1} / {total_pages}")
-            embeds.append(embed)
-
-        # Setup view
-        view = None
-        if len(embeds) > 1:
-            view = StatusPaginator(embeds)
-        else:
-            # If only 1 page, we still send the view but it clears its own buttons in __init__
-            view = StatusPaginator(embeds)
-
-        await interaction.followup.send(embed=embeds[0], view=view, ephemeral=True)
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(QuestCog(bot))get('completed', 0)}` | "
-                f"**Errors:** `{stats.get('errors', 0)}`"
-            )
-
-            embed = ui.card(
-                title="📊 Quest Farmer Status",
-                description=status_desc,
-                color=ui.OK_COLOR,
-            )
-            
-            quest_text = ""
-            if not chunk:
-                quest_text = "*No active quests found.*"
-            for q in chunk:
-                name = q.get("config", {}).get("messages", {}).get("questName", "Unknown Quest")
-                us = q.get("userStatus", {})
-                enrolled = bool(us.get("enrolledAt"))
-                completed = bool(us.get("completedAt"))
-                
-                progress_str = "0/0"
-                if enrolled and not completed:
-                    prog = us.get("progress", {})
-                    for task_type, data in prog.items():
-                        val = data.get("value", 0)
-                        target = q.get("config", {}).get("taskConfig", {}).get("tasks", {}).get(task_type, {}).get("target", 0)
-                        progress_str = f"{int(val)}/{target}"
-                        break
-                elif completed:
-                    progress_str = "Completed ✅"
-                
-                status_icon = "🟢" if completed else ("🟡" if enrolled else "⚪")
                 quest_text += f"{status_icon} **{name}**\n└ `{progress_str}`\n\n"
 
             embed.add_field(name="Active Quests", value=quest_text.strip() or "None", inline=False)
