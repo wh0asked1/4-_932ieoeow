@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands
 
 import config
+import quests_cog  # <-- direct import of the flattened cog
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("questbot")
@@ -15,7 +16,10 @@ class QuestBot(commands.Bot):
         super().__init__(command_prefix="!", intents=discord.Intents.default())
 
     async def setup_hook(self):
-        await self.load_extension("cogs.quests")
+        # Load the flattened cog
+        await self.load_extension("quests_cog")
+        
+        # Sync slash commands
         if config.GUILD_ID:
             guild = discord.Object(id=int(config.GUILD_ID))
             self.tree.copy_global_to(guild=guild)
