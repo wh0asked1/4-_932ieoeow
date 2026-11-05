@@ -12,7 +12,7 @@ from discord.ext import commands
 import config
 import ui
 from api import DiscordAPI, fetch_latest_build_number
-from quests import QuestRunner, get_quest_name, get_seconds_needed, get_seconds_done, get_user_status
+from quests import QuestRunner, get_quest_name, get_seconds_needed, get_seconds_done, get_user_status, is_enrolled, is_completed
 
 
 def make_bar(current, total, length=10):
@@ -222,8 +222,8 @@ class QuestCog(commands.Cog):
 
         accepted_quests = []
         for q in all_quests:
-            us = get_user_status(q)
-            if us.get("enrolledAt") and not us.get("completedAt"):
+            # Using the helper functions to catch both camelCase and snake_case
+            if is_enrolled(q) and not is_completed(q):
                 accepted_quests.append(q)
 
         embeds = []
