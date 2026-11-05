@@ -1,4 +1,4 @@
-"""Slash commands: /start /stop /login /token /removetoken /status /ping
+"""Slash commands: /start /stop /login /logout /status /ping
 Ephemeral everywhere except /ping."""
 
 import asyncio
@@ -14,8 +14,6 @@ import config
 import ui
 from api import DiscordAPI, fetch_latest_build_number
 from quests import QuestRunner
-
-MISSING_TOKEN_MSG = "Missing token, please insert it via `/token` or `/login`."
 
 # ── Pagination View ────────────────────────────────────────────────────────────
 class StatusPaginator(discord.ui.View):
@@ -126,65 +124,38 @@ class QuestCog(commands.Cog):
     # ── commands ───────────────────────────────────────────────────────────
     @app_commands.command(name="ping", description="Check if the bot is alive.")
     async def ping(self, interaction: discord.Interaction):
-        # NOT ephemeral
         await interaction.response.send_message(embed=ui.ok(
             "Pong 🏓", f"Gateway latency: `{round(self.bot.latency * 1000)}ms`"))
 
-    @app_commands.command(name="token", description="Set the user token used for quest farming.")
-    @app_commands.describe(user_id="Your Discord User ID", token="The user token")
-    async def token_cmd(self, interaction: discord.Interaction, user_id: str, token: str):
+    @app_commands.command(name="login", description="Log in with your user token.")
+    @app_commands.describe(token="The user token to log in with")
+    async def login(self, interaction: discord.Interaction, token: str):
         await interaction.response.defer(ephemeral=True)
         
-        if not user_id.isdigit():
-            return await interaction.followup.send(
-                embed=ui.err("Invalid ID", "User ID must be a number."), ephemeral=True)
-
         api = DiscordAPI(token.strip(), self.build_number)
         user = api.validate()
+        
         if not user:
             return await interaction.followup.send(
-                embed=ui.err("Token rejected", "Discord said no. Check the token and retry."),
+                embed=ui.err("Token Rejected", "Rejected by Discord. Invalid token."), 
                 ephemeral=True)
         
-        if str(user["id"]) != user_id:
-            return await interaction.followup.send(
-                embed=ui.err("Mismatch", "The User ID provided doesn't match the token."), ephemeral=True)
-
         self.user_token = token.strip()
         await interaction.followup.send(embed=ui.ok(
-            "Token Set",
-            "Quest farmer is armed and ready.",
+            "Logged In",
+            "The account on the bench is live and saved.",
             [("Account", f"**{user['username']}**\n`{user['id']}`", False)]),
             ephemeral=True)
 
-    @app_commands.command(name="removetoken", description="Forget the stored user token.")
-    async def removetoken(self, interaction: discord.Interaction):
+    @app_commands.command(name="logout", description="Forget the stored user token.")
+    async def logout(self, interaction: discord.Interaction):
         self.user_token = None
         await interaction.response.send_message(
-            embed=ui.warn("Token Cleared", "Nothing on the bench. `/token` to set again."),
-            ephemeral=True)
-
-    @app_commands.command(name="login", description="Validate the current token and show the account.")
-    async def login(self, interaction: discord.Interaction):
-        # No missing-token warning here, just let the API validate it
-        await interaction.response.defer(ephemeral=True)
-        api = DiscordAPI(self.user_token or "", self.build_number)
-        user = api.validate()
-        
-        if not user:
-            return await interaction.followup.send(
-                embed=ui.err("Token Rejected", "Rejected by Discord. Missing or invalid token."), 
-                ephemeral=True)
-        
-        await interaction.followup.send(embed=ui.ok(
-            "Logged In",
-            "The account on the bench is live.",
-            [("Account", f"**{user['username']}**\n`{user['id']}`", False)]),
+            embed=ui.warn("Logged Out", "Token cleared. The bench is empty."),
             ephemeral=True)
 
     @app_commands.command(name="start", description="Start the quest auto-farmer.")
     async def start(self, interaction: discord.Interaction):
-        # No missing-token warning here, just let the API validate it
         if self._running():
             return await interaction.response.send_message(
                 embed=ui.warn("Already Running", "The farmer's already on the floor."),
@@ -196,7 +167,7 @@ class QuestCog(commands.Cog):
         user = api.validate()
         if not user:
             return await interaction.followup.send(
-                embed=ui.err("Token Invalid", "Missing or invalid token. Use `/token` first."), 
+                embed=ui.err("Token Invalid", "Missing or invalid token. Use `/login` first."), 
                 ephemeral=True)
 
         self.build_number = await asyncio.to_thread(fetch_latest_build_number)
@@ -223,9 +194,6 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="stop", description="Stop the quest auto-farmer.")
     async def stop(self, interaction: discord.Interaction):
-        if not self.user_token:
-            return await interaction.response.send_message(
-                embed=ui.warn("Missing Token", MISSING_TOKEN_MSG), ephemeral=True)
         if not self._running():
             return await interaction.response.send_message(
                 embed=ui.warn("Not Running", "Nothing to stop."), ephemeral=True)
@@ -242,14 +210,16 @@ class QuestCog(commands.Cog):
     async def status(self, interaction: discord.Interaction):
         if not self.user_token:
             return await interaction.response.send_message(
-                embed=ui.warn("Missing Token", MISSING_TOKEN_MSG), ephemeral=True)
+                embed=ui.warn("Missing Token", "Missing token, please insert it via `/login`"), ephemeral=True)
+
+        if not self._running():
+            return await interaction.response.send_message(
+                embed=ui.warn("Not Running", "The bot is not running. Start it with `/start`."), ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
-        running = self._running()
         stats = self._runner.stats if self._runner else {}
-        token_state = "🟢 Set"
         uptime = "—"
-        if self._started_at and running:
+        if self._started_at:
             delta = datetime.now(timezone.utc) - self._started_at
             uptime = str(delta).split(".")[0]
 
@@ -269,8 +239,7 @@ class QuestCog(commands.Cog):
             chunk = quests[start:start + per_page]
             
             status_desc = (
-                f"**State:** {'🟢 Running' if running else '🔴 Stopped'}\n"
-                f"**Token:** {token_state}\n"
+                f"**State:** 🟢 Running\n"
                 f"**Uptime:** `{uptime}`\n"
                 f"**Accepted:** `{stats.get('accepted', 0)}` | "
                 f"**Completed:** `{stats.get('completed', 0)}` | "
@@ -280,7 +249,7 @@ class QuestCog(commands.Cog):
             embed = ui.card(
                 title="📊 Quest Farmer Status",
                 description=status_desc,
-                color=ui.OK_COLOR if running else ui.ERR_COLOR,
+                color=ui.OK_COLOR,
             )
             
             quest_text = ""
