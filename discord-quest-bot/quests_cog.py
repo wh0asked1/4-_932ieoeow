@@ -346,9 +346,8 @@ class QuestCog(commands.Cog):
         
         worker = self._workers[user_id]
         token = self.accounts[interaction.user.id]["token"]
-        api = DiscordAPI(token, self.build_number) # Fresh session for status
         
-        view = await self._build_status_view(api, user_id, worker)
+        view = await self._build_status_view(token, user_id, worker)
         msg = await interaction.followup.send(embed=view.embeds[0], view=view, ephemeral=True)
 
         for _ in range(30):
@@ -356,12 +355,12 @@ class QuestCog(commands.Cog):
             if user_id not in self._workers or not self._workers[user_id]["thread"].is_alive() or msg.flags.ephemeral is False:
                 break
             try:
-                new_view = await self._build_status_view(api, user_id, self._workers[user_id])
+                new_view = await self._build_status_view(token, user_id, self._workers[user_id])
                 await msg.edit(embed=new_view.embeds[0], view=new_view)
             except Exception:
                 break
 
-    async def _build_status_view(self, api, user_id, worker_data):
+    async def _build_status_view(self, token, user_id, worker_data):
         total = worker_data["total_seconds"] + (time.time() - worker_data["start_time"])
         h = int(total // 3600)
         m = int((total % 3600) // 60)
@@ -371,7 +370,8 @@ class QuestCog(commands.Cog):
         all_quests = []
         try:
             def fetch():
-                return api.get("/quests/@me").json().get("quests", [])
+                temp_api = DiscordAPI(token, self.build_number)
+                return temp_api.get("/quests/@me").json().get("quests", [])
             all_quests = await asyncio.to_thread(fetch)
         except Exception:
             pass
