@@ -1,4 +1,5 @@
-"""Slash commands: /start /stop /login /token /removetoken /status /ping"""
+"""Slash commands: /start /stop /login /token /removetoken /status /ping
+Every reply is a branded embed carrying the founder credit."""
 import asyncio
 import threading
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import config
+import ui
 from api import DiscordAPI, fetch_latest_build_number
 from quests import QuestRunner
 
@@ -44,17 +46,14 @@ class QuestCog(commands.Cog):
                 return
             self._log(f"logged in as {user['username']} ({user['id']})")
             self._runner = QuestRunner(api, on_log=self._log, stop_event=self._stop)
-
             while not self._stop.is_set():
                 try:
                     self._runner.run()
                 except Exception as e:
                     self._log(f"loop err: {e}")
-                # sleep between passes, but break if stopped
                 for _ in range(config.POLL_INTERVAL):
                     if self._stop.is_set():
                         break
-                    asyncio.run(asyncio.sleep(0)) if False else None
                     threading.Event().wait(1)
         except Exception as e:
             self._log(f"worker fatal: {e}")
@@ -62,112 +61,132 @@ class QuestCog(commands.Cog):
     def _running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    async def _deny(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            embed=ui.err("Not yours to touch", "This command is owner-gated."),
+            ephemeral=True,
+        )
+
     # ── commands ───────────────────────────────────────────────────────────
     @app_commands.command(name="ping", description="Check if the bot is alive.")
     async def ping(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            f"pong 🏓 — {round(self.bot.latency * 1000)}ms"
-        )
+        await interaction.response.send_message(embed=ui.ok(
+            "Pong 🏓", f"Gateway latency: `{round(self.bot.latency * 1000)}ms`"))
 
     @app_commands.command(name="token", description="Set the user token used for quest farming.")
     @app_commands.describe(token="The Discord user token (keep it private!)")
     async def token_cmd(self, interaction: discord.Interaction, token: str):
         if not self._is_owner(interaction):
-            return await interaction.response.send_message("not yours to touch", ephemeral=True)
-
+            return await self._deny(interaction)
         await interaction.response.defer(ephemeral=True)
         api = DiscordAPI(token.strip(), self.build_number)
         user = api.validate()
         if not user:
-            return await interaction.followup.send("❌ token invalid — try again", ephemeral=True)
-
+            return await interaction.followup.send(
+                embed=ui.err("Token rejected", "Discord said no. Check the token and retry."),
+                ephemeral=True)
         self.user_token = token.strip()
-        await interaction.followup.send(
-            f"✅ token set — logged in as **{user['username']}** (`{user['id']}`)",
-            ephemeral=True,
-        )
+        await interaction.followup.send(embed=ui.ok(
+            "Token Set",
+            "Quest farmer is armed and ready.",
+            [("Account", f"**{user['username']}**\n`{user['id']}`", False)]),
+            ephemeral=True)
 
     @app_commands.command(name="removetoken", description="Forget the stored user token.")
     async def removetoken(self, interaction: discord.Interaction):
         if not self._is_owner(interaction):
-            return await interaction.response.send_message("not yours to touch", ephemeral=True)
+            return await self._deny(interaction)
         self.user_token = None
-        await interaction.response.send_message("🧽 token cleared", ephemeral=True)
+        await interaction.response.send_message(
+            embed=ui.warn("Token Cleared", "Nothing on the bench. `/token` to set again."),
+            ephemeral=True)
 
     @app_commands.command(name="login", description="Validate the current token and show the account.")
     async def login(self, interaction: discord.Interaction):
         if not self._is_owner(interaction):
-            return await interaction.response.send_message("not yours to touch", ephemeral=True)
+            return await self._deny(interaction)
         if not self.user_token:
             return await interaction.response.send_message(
-                "no token set — use `/token <token>`", ephemeral=True)
+                embed=ui.warn("No Token", "Use `/token <token>` first."), ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         api = DiscordAPI(self.user_token, self.build_number)
         user = api.validate()
         if not user:
-            return await interaction.followup.send("❌ token rejected", ephemeral=True)
-        await interaction.followup.send(
-            f"✅ logged in as **{user['username']}** (`{user['id']}`)", ephemeral=True)
+            return await interaction.followup.send(
+                embed=ui.err("Token Rejected", "Rejected by Discord."), ephemeral=True)
+        await interaction.followup.send(embed=ui.ok(
+            "Logged In",
+            "The account on the bench is live.",
+            [("Account", f"**{user['username']}**\n`{user['id']}`", False)]),
+            ephemeral=True)
 
     @app_commands.command(name="start", description="Start the quest auto-farmer.")
     async def start(self, interaction: discord.Interaction):
         if not self._is_owner(interaction):
-            return await interaction.response.send_message("not yours to touch", ephemeral=True)
+            return await self._deny(interaction)
         if not self.user_token:
             return await interaction.response.send_message(
-                "set a token first: `/token <token>`", ephemeral=True)
+                embed=ui.warn("No Token", "Set one first: `/token <token>`"), ephemeral=True)
         if self._running():
-            return await interaction.response.send_message("already running 🏃", ephemeral=True)
-
+            return await interaction.response.send_message(
+                embed=ui.warn("Already Running", "The farmer's already on the floor."),
+                ephemeral=True)
         await interaction.response.defer()
         self.build_number = await asyncio.to_thread(fetch_latest_build_number)
         self._stop.clear()
         self._started_at = datetime.now(timezone.utc)
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
-        await interaction.followup.send(
-            f"🚀 quest farmer started — build `{self.build_number}`")
+        await interaction.followup.send(embed=ui.ok(
+            "Quest Farmer Started",
+            "Scanning, accepting, completing — hands are moving.",
+            [("Client Build", f"`{self.build_number}`", True),
+             ("Poll Interval", f"`{config.POLL_INTERVAL}s`", True)]))
 
     @app_commands.command(name="stop", description="Stop the quest auto-farmer.")
     async def stop(self, interaction: discord.Interaction):
         if not self._is_owner(interaction):
-            return await interaction.response.send_message("not yours to touch", ephemeral=True)
+            return await self._deny(interaction)
         if not self._running():
-            return await interaction.response.send_message("not running", ephemeral=True)
+            return await interaction.response.send_message(
+                embed=ui.warn("Not Running", "Nothing to stop."), ephemeral=True)
         await interaction.response.defer()
         self._stop.set()
         self._thread.join(timeout=10)
         self._thread = None
         self._runner = None
-        await interaction.followup.send("🛑 stopped")
+        await interaction.followup.send(embed=ui.ok(
+            "Quest Farmer Stopped", "Thread closed clean. Bench tidied."))
 
     @app_commands.command(name="status", description="Show farmer status and recent log.")
     async def status(self, interaction: discord.Interaction):
         if not self._is_owner(interaction):
-            return await interaction.response.send_message("not yours to touch", ephemeral=True)
+            return await self._deny(interaction)
         await interaction.response.defer()
         running = self._running()
-        uptime = ""
-        if self._started_at and running:
-            delta = datetime.now(timezone.utc) - self._started_at
-            uptime = f"\n**uptime:** `{str(delta).split('.')[0]}`"
         stats = self._runner.stats if self._runner else {}
         token_state = "set ✅" if self.user_token else "missing ❌"
+        uptime = "—"
+        if self._started_at and running:
+            delta = datetime.now(timezone.utc) - self._started_at
+            uptime = str(delta).split(".")[0]
         log_tail = "\n".join(self._log_buffer[-10:]) or "(no log yet)"
-        embed = discord.Embed(
-            title="Quest Farmer Status",
-            color=discord.Color.green() if running else discord.Color.red(),
+
+        embed = ui.card(
+            title="📊 Quest Farmer Status",
+            description="Live snapshot off the bench.",
+            color=ui.OK_COLOR if running else ui.ERR_COLOR,
+            fields=[
+                ("State", "🟢 running" if running else "🔴 stopped", True),
+                ("Token", token_state, True),
+                ("Uptime", f"`{uptime}`", True),
+                ("Client Build", f"`{self.build_number}`", True),
+                ("Accepted", f"`{stats.get('accepted', 0)}`", True),
+                ("Completed", f"`{stats.get('completed', 0)}`", True),
+                ("Errors", f"`{stats.get('errors', 0)}`", True),
+                ("Recent Log", f"```{log_tail[-1000:]}```", False),
+            ],
         )
-        embed.add_field(name="running", value="yes" if running else "no", inline=True)
-        embed.add_field(name="token", value=token_state, inline=True)
-        embed.add_field(name="build", value=str(self.build_number), inline=True)
-        embed.add_field(name="stats", value=(
-            f"accepted: `{stats.get('accepted', 0)}`\n"
-            f"completed: `{stats.get('completed', 0)}`\n"
-            f"errors: `{stats.get('errors', 0)}`"
-        ), inline=False)
-        embed.add_field(name="recent log",
-                        value=f"```{log_tail[-1000:]}```", inline=False)
         await interaction.followup.send(embed=embed)
 
 
