@@ -283,7 +283,8 @@ class QuestCog(commands.Cog):
             "runner": None,
             "start_time": time.time(),
             "total_seconds": 0,
-            "api": api
+            "api": api,
+            "last_quests": []  # Fallback cache
         }
 
         t = threading.Thread(target=self._worker, args=(api, user, interaction.user, stop_event), daemon=True)
@@ -373,8 +374,13 @@ class QuestCog(commands.Cog):
                 temp_api = DiscordAPI(token, self.build_number)
                 return temp_api.get("/quests/@me").json().get("quests", [])
             all_quests = await asyncio.to_thread(fetch)
+            if all_quests:
+                worker_data["last_quests"] = all_quests
         except Exception:
             pass
+            
+        if not all_quests:
+            all_quests = worker_data.get("last_quests", [])
 
         enrolled_quests = []
         accepted_count = 0
