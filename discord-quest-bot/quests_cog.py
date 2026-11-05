@@ -102,66 +102,45 @@ class StatusPaginator(discord.ui.View):
 class QuestCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.user_token = config.DEFAULT_USER_TOKEN or None
-        self.user_id = None
-        self._selfbot_user = None
-        self._dm_user = None
+        self.accounts = {} # discord_user_id -> { "token": str, "user": dict }
+        self._workers = {} # selfbot_user_id -> { "thread": Thread, "monitor": Thread, "stop": Event, "start_time": float, "total_seconds": float, "api": DiscordAPI }
+        
         self.build_number = config.DEFAULT_BUILD_NUMBER
         self.notifications_enabled = True
-        
-        self._thread = None
-        self._monitor_thread = None
-        self._stop = threading.Event()
-        self._runner = None
-        self._api_cache = None
-        
-        self._total_seconds = 0
-        self._last_start_time = None
 
     def _log(self, msg):
         print(msg)
 
-    @property
-    def _uptime_str(self):
-        total = self._total_seconds
-        if self._running() and self._last_start_time:
-            total += (time.time() - self._last_start_time)
-        h = int(total // 3600)
-        m = int((total % 3600) // 60)
-        s = int(total % 60)
-        return str(h) + "h " + str(m) + "m " + str(s) + "s"
-
-    def _update_tracker(self):
-        if not self._api_cache or not self.user_id:
-            return
+    def _update_tracker(self, api, selfbot_user, dm_user):
+        user_id = selfbot_user['id']
         try:
-            quests = self._api_cache.get("/quests/@me").json().get("quests", [])
+            quests = api.get("/quests/@me").json().get("quests", [])
             tracker = load_tracker()
-            if self.user_id not in tracker:
-                tracker[self.user_id] = {}
+            if user_id not in tracker:
+                tracker[user_id] = {}
             changed = False
             
             newly_completed = []
             for q in quests:
                 if is_completed(q):
                     name = get_quest_name(q)
-                    if name not in tracker[self.user_id]:
-                        tracker[self.user_id][name] = datetime.now(timezone.utc).isoformat()
+                    if name not in tracker[user_id]:
+                        tracker[user_id][name] = datetime.now(timezone.utc).isoformat()
                         changed = True
                         newly_completed.append(q)
             
             if changed:
                 save_tracker(tracker)
                 
-            if self.notifications_enabled and self._dm_user:
+            if self.notifications_enabled and dm_user:
                 for q in newly_completed:
                     name = get_quest_name(q)
                     orbs = get_orbs(q)
-                    self._send_completion_dm(name, orbs)
+                    self._send_completion_dm(dm_user, selfbot_user, name, orbs)
         except Exception:
             pass
 
-    def _send_completion_dm(self, name, orbs):
+    def _send_completion_dm(self, dm_user, selfbot_user, name, orbs):
         fields = []
         fields.append(("Quest", "**" + name + "**", False))
         if orbs > 0:
@@ -169,68 +148,61 @@ class QuestCog(commands.Cog):
         
         embed = ui.ok("✅ Quest Completed", "A quest just finished on the bench.", fields)
         
-        if self._selfbot_user and self._selfbot_user.get('avatar'):
-            avatar_url = "https://cdn.discordapp.com/avatars/" + self._selfbot_user['id'] + "/" + self._selfbot_user['avatar'] + ".png"
+        if selfbot_user and selfbot_user.get('avatar'):
+            avatar_url = "https://cdn.discordapp.com/avatars/" + selfbot_user['id'] + "/" + selfbot_user['avatar'] + ".png"
             embed.set_thumbnail(url=avatar_url)
         
         async def send():
             try:
-                await self._dm_user.send(embed=embed)
+                await dm_user.send(embed=embed)
             except Exception:
                 pass
         
         asyncio.run_coroutine_threadsafe(send(), self.bot.loop)
 
-    def _monitor_loop(self):
-        while not self._stop.is_set():
-            self._update_tracker()
+    def _monitor_loop(self, api, selfbot_user, dm_user, stop_event):
+        while not stop_event.is_set():
+            self._update_tracker(api, selfbot_user, dm_user)
             for _ in range(15):
-                if self._stop.is_set():
+                if stop_event.is_set():
                     return
                 threading.Event().wait(1)
 
-    def _worker(self, owner_interaction: discord.Interaction):
-        try:
-            api = DiscordAPI(self.user_token, self.build_number)
-            user = api.validate()
-            if not user:
-                self._log("token invalid — worker aborting")
-                return
+    def _worker(self, api, selfbot_user, dm_user, stop_event):
+        user_id = selfbot_user['id']
+        runner = QuestRunner(api, on_log=self._log, stop_event=stop_event)
+        if user_id in self._workers:
+            self._workers[user_id]["runner"] = runner
             
-            self._api_cache = api
-            self._selfbot_user = user
-            self.user_id = user['id']
-            self._log("logged in as " + user['username'])
-            self._runner = QuestRunner(api, on_log=self._log, stop_event=self._stop)
-
-            while not self._stop.is_set():
+        try:
+            while not stop_event.is_set():
                 try:
-                    self._runner.run()
-                    self._update_tracker()
+                    runner.run()
+                    self._update_tracker(api, selfbot_user, dm_user)
                 except Exception as e:
                     self._log("loop err: " + str(e))
                 
-                if self._stop.is_set():
+                if stop_event.is_set():
                     break
                 
                 for _ in range(config.POLL_INTERVAL):
-                    if self._stop.is_set():
+                    if stop_event.is_set():
                         break
                     threading.Event().wait(1)
 
-            self._update_tracker()
-            self._send_summary_dm(owner_interaction, user)
+            self._update_tracker(api, selfbot_user, dm_user)
+            self._send_summary_dm(dm_user, selfbot_user, runner)
 
         except Exception as e:
             self._log("worker fatal: " + str(e))
 
-    def _send_summary_dm(self, interaction: discord.Interaction, user_data: dict):
-        if not self._runner:
+    def _send_summary_dm(self, dm_user, selfbot_user, runner):
+        if not runner:
             return
         
-        stats = self._runner.stats
+        stats = runner.stats
         fields = []
-        fields.append(("Account", "**" + user_data['username'] + "**", True))
+        fields.append(("Account", "**" + selfbot_user['username'] + "**", True))
         fields.append(("Total Accepted", "`" + str(stats.get('accepted', 0)) + "`", True))
         fields.append(("Total Completed", "`" + str(stats.get('completed', 0)) + "`", True))
         
@@ -238,14 +210,11 @@ class QuestCog(commands.Cog):
         
         async def send_dm():
             try:
-                await interaction.user.send(embed=embed)
+                await dm_user.send(embed=embed)
             except discord.Forbidden:
                 self._log("Could not DM user (DMs closed).")
         
         asyncio.run_coroutine_threadsafe(send_dm(), self.bot.loop)
-
-    def _running(self):
-        return self._thread is not None and self._thread.is_alive()
 
     @app_commands.command(name="ping", description="Check if the bot is alive.")
     async def ping(self, interaction: discord.Interaction):
@@ -268,9 +237,11 @@ class QuestCog(commands.Cog):
         if not user:
             return await interaction.followup.send(embed=ui.err("Token Rejected", "Rejected by Discord. Invalid token."), ephemeral=True)
         
-        self.user_token = token.strip()
-        self.user_id = user['id']
-        self._selfbot_user = user
+        self.accounts[interaction.user.id] = {
+            "token": token.strip(),
+            "user": user
+        }
+        
         acc_str = "**" + user['username'] + "**\n`" + user['id'] + "`"
         await interaction.followup.send(
             embed=ui.ok("Logged In", "The account on the bench is live and saved.", [("Account", acc_str, False)]),
@@ -279,35 +250,47 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="logout", description="Forget the stored user token.")
     async def logout(self, interaction: discord.Interaction):
-        self.user_token = None
-        self.user_id = None
-        self._selfbot_user = None
+        if interaction.user.id in self.accounts:
+            del self.accounts[interaction.user.id]
+            
         await interaction.response.send_message(embed=ui.warn("Logged Out", "Token cleared. The bench is empty."), ephemeral=True)
 
     @app_commands.command(name="start", description="Start the quest auto-farmer.")
     async def start(self, interaction: discord.Interaction):
-        if self._running():
-            return await interaction.response.send_message(embed=ui.warn("Already Running", "The farmer's already on the floor."), ephemeral=True)
+        if interaction.user.id not in self.accounts:
+            return await interaction.response.send_message(embed=ui.err("Not Logged In", "Use `/login` first."), ephemeral=True)
+            
+        acc = self.accounts[interaction.user.id]
+        user = acc["user"]
+        user_id = user['id']
+        
+        if user_id in self._workers and self._workers[user_id]["thread"].is_alive():
+            return await interaction.response.send_message(embed=ui.warn("Already Running", "This account is already on the floor."), ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
-        api = DiscordAPI(self.user_token or "", self.build_number)
-        user = api.validate()
-        if not user:
-            return await interaction.followup.send(embed=ui.err("Token Invalid", "Missing or invalid token. Use `/login` first."), ephemeral=True)
-
-        self.user_id = user['id']
-        self._selfbot_user = user
-        self._dm_user = interaction.user
-        self._last_start_time = time.time()
+        api = DiscordAPI(acc["token"], self.build_number)
         
         self.build_number = await asyncio.to_thread(fetch_latest_build_number)
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._worker, args=(interaction,), daemon=True)
-        self._thread.start()
+        stop_event = threading.Event()
         
-        if not getattr(self, "_monitor_thread", None) or not self._monitor_thread.is_alive():
-            self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-            self._monitor_thread.start()
+        self._workers[user_id] = {
+            "thread": None,
+            "monitor_thread": None,
+            "stop": stop_event,
+            "runner": None,
+            "start_time": time.time(),
+            "total_seconds": 0,
+            "api": api
+        }
+
+        t = threading.Thread(target=self._worker, args=(api, user, interaction.user, stop_event), daemon=True)
+        m = threading.Thread(target=self._monitor_loop, args=(api, user, interaction.user, stop_event), daemon=True)
+        
+        self._workers[user_id]["thread"] = t
+        self._workers[user_id]["monitor_thread"] = m
+        
+        t.start()
+        m.start()
 
         user_created_at = datetime.fromtimestamp(discord.utils.snowflake_time(int(user['id'])).timestamp())
         
@@ -328,90 +311,111 @@ class QuestCog(commands.Cog):
 
     @app_commands.command(name="stop", description="Stop the quest auto-farmer.")
     async def stop(self, interaction: discord.Interaction):
-        if not self._running():
-            return await interaction.response.send_message(embed=ui.warn("Not Running", "Nothing to stop."), ephemeral=True)
+        if interaction.user.id not in self.accounts:
+            return await interaction.response.send_message(embed=ui.warn("No Account", "Use `/login` first."), ephemeral=True)
+            
+        user_id = self.accounts[interaction.user.id]["user"]["id"]
+        
+        if user_id not in self._workers or not self._workers[user_id]["thread"].is_alive():
+            return await interaction.response.send_message(embed=ui.warn("Not Running", "Your farmer is not running."), ephemeral=True)
         
         await interaction.response.defer(ephemeral=True)
         
-        if self._last_start_time:
-            self._total_seconds += time.time() - self._last_start_time
-            self._last_start_time = None
-            
-        self._stop.set()
-        self._thread = None
+        worker = self._workers[user_id]
+        worker["stop"].set()
+        worker["total_seconds"] += time.time() - worker["start_time"]
+        
+        del self._workers[user_id]
         
         await interaction.followup.send(embed=ui.ok("Quest Farmer Stopped", "Thread closed clean. Bench tidied."), ephemeral=True)
 
     @app_commands.command(name="status", description="Show live farmer status and active quests.")
     async def status(self, interaction: discord.Interaction):
-        if not self.user_token:
-            return await interaction.response.send_message(embed=ui.warn("Missing Token", "Missing token, please insert it via `/login`"), ephemeral=True)
-        if not self._running():
-            return await interaction.response.send_message(embed=ui.warn("Not Running", "The bot is not running. Start it with `/start`."), ephemeral=True)
+        if interaction.user.id not in self.accounts:
+            return await interaction.response.send_message(embed=ui.warn("No Account", "Use `/login` first."), ephemeral=True)
+            
+        user_id = self.accounts[interaction.user.id]["user"]["id"]
+        
+        if user_id not in self._workers or not self._workers[user_id]["thread"].is_alive():
+            return await interaction.response.send_message(embed=ui.warn("Not Running", "Your farmer is not running."), ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
         
-        view = await self._build_status_view()
+        worker = self._workers[user_id]
+        api = worker["api"]
+        
+        view = await self._build_status_view(api, user_id, worker)
         msg = await interaction.followup.send(embed=view.embeds[0], view=view, ephemeral=True)
 
         for _ in range(30):
             await asyncio.sleep(10)
-            if not self._running() or msg.flags.ephemeral is False:
+            if user_id not in self._workers or not self._workers[user_id]["thread"].is_alive() or msg.flags.ephemeral is False:
                 break
             try:
-                new_view = await self._build_status_view()
+                new_view = await self._build_status_view(api, user_id, self._workers[user_id])
                 await msg.edit(embed=new_view.embeds[0], view=new_view)
             except Exception:
                 break
 
-    async def _build_status_view(self):
-        uptime = self._uptime_str
+    async def _build_status_view(self, api, user_id, worker_data):
+        total = worker_data["total_seconds"] + (time.time() - worker_data["start_time"])
+        h = int(total // 3600)
+        m = int((total % 3600) // 60)
+        s = int(total % 60)
+        uptime = str(h) + "h " + str(m) + "m " + str(s) + "s"
+        
         all_quests = []
-        if self._api_cache:
-            try:
-                def fetch():
-                    return self._api_cache.get("/quests/@me").json().get("quests", [])
-                all_quests = await asyncio.to_thread(fetch)
-            except Exception:
-                pass
+        try:
+            def fetch():
+                return api.get("/quests/@me").json().get("quests", [])
+            all_quests = await asyncio.to_thread(fetch)
+        except Exception:
+            pass
 
-        accepted_quests = []
-        completed_quests = []
+        enrolled_quests = []
+        accepted_count = 0
+        completed_count = 0
+        
         for q in all_quests:
-            if is_enrolled(q) and not is_completed(q):
-                accepted_quests.append(q)
-            elif is_completed(q):
-                completed_quests.append(q)
+            if is_enrolled(q):
+                enrolled_quests.append(q)
+                if is_completed(q):
+                    completed_count += 1
+                else:
+                    accepted_count += 1
+
+        enrolled_quests.sort(key=lambda x: is_completed(x))
 
         embeds = []
         per_page = 5
-        total_pages = max(1, math.ceil(len(accepted_quests) / per_page))
+        total_pages = max(1, math.ceil(len(enrolled_quests) / per_page))
 
         for page in range(total_pages):
             start = page * per_page
-            chunk = accepted_quests[start:start + per_page]
+            chunk = enrolled_quests[start:start + per_page]
             
             status_desc = "**State:** 🟢 Running\n"
             status_desc += "**Total Hours:** `" + uptime + "`\n"
-            status_desc += "**Accepted:** `" + str(len(accepted_quests)) + "` | "
-            status_desc += "**Completed:** `" + str(len(completed_quests)) + "`\n"
+            status_desc += "**Accepted:** `" + str(accepted_count) + "` | "
+            status_desc += "**Completed:** `" + str(completed_count) + "`\n"
 
             embed = ui.card(title="📊 Quest Farmer Status", description=status_desc, color=ui.OK_COLOR)
             
             quest_text = ""
             if not chunk:
-                quest_text = "*No accepted quests pending.*"
+                quest_text = "*No enrolled quests found.*"
             for q in chunk:
                 name = get_quest_name(q)
-                val = get_seconds_done(q)
-                target = get_seconds_needed(q)
-                
-                bar_str = make_bar(val, target)
-                
-                quest_text += "**" + name + "**\n"
-                quest_text += "`" + str(int(val)) + "/" + str(target) + "` " + bar_str + "\n\n"
+                if is_completed(q):
+                    quest_text += "**" + name + "**\n✅ `Completed`\n\n"
+                else:
+                    val = get_seconds_done(q)
+                    target = get_seconds_needed(q)
+                    bar_str = make_bar(val, target)
+                    quest_text += "**" + name + "**\n"
+                    quest_text += "`" + str(int(val)) + "/" + str(target) + "` " + bar_str + "\n\n"
 
-            embed.add_field(name="Active Quests", value=quest_text.strip() or "None", inline=False)
+            embed.add_field(name="Your Quests", value=quest_text.strip() or "None", inline=False)
             embed.set_footer(text="🏷️ Founder @tryacidbacon | Page " + str(page + 1) + " / " + str(total_pages))
             embeds.append(embed)
 
