@@ -214,7 +214,9 @@ class QuestCog(commands.Cog):
         all_quests = []
         if self._api_cache:
             try:
-                all_quests = self._api_cache.get("/quests/@me").json().get("quests", [])
+                def fetch():
+                    return self._api_cache.get("/quests/@me").json().get("quests", [])
+                all_quests = await asyncio.to_thread(fetch)
             except Exception:
                 pass
 
